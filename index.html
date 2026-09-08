@@ -1,0 +1,205 @@
+<!DOCTYPE html>
+<html lang="ko">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>MOONLIGHT MARKET · 너구리</title>
+<style>
+*{box-sizing:border-box}body{margin:0;min-height:100vh;display:grid;place-items:center;background:#090f1b;color:#e7ead3;font-family:monospace}main{width:min(960px,96vw);padding:24px 0}header{display:flex;align-items:center;justify-content:space-between;margin-bottom:16px}h1{font-size:clamp(18px,3vw,28px);letter-spacing:3px;margin:0}header small{color:#99ae9b;font-size:11px;letter-spacing:2px}.badge{color:#bde877;border:1px solid #526747;padding:8px 12px;font-size:11px}canvas{display:block;width:100%;aspect-ratio:4/3;background:#101828;border:2px solid #53654f;box-shadow:0 16px 70px #0008;image-rendering:pixelated;outline:none}footer{display:flex;justify-content:space-between;gap:12px;flex-wrap:wrap;color:#91a297;font-size:12px;margin-top:16px}button{font:inherit;color:#c7dbb0;background:#172536;border:1px solid #526747;padding:8px 12px;cursor:pointer}button:focus-visible{outline:2px solid #ffe68b}kbd{color:#f6dd87}p{margin:0}.touch{display:flex;justify-content:space-between;margin-top:12px;gap:8px}.touch button{min-width:44px;min-height:44px;touch-action:none;user-select:none}.touch div{display:flex;gap:6px}@media(min-width:900px) and (pointer:fine){.touch{display:none}}
+</style>
+</head>
+<body>
+<main>
+<header><div><small>THE MIDNIGHT ARCADE / 01</small><h1>MOONLIGHT MARKET</h1></div><span class="badge">너구리 · 1982 SPIRIT</span></header>
+<canvas id="game" width="800" height="600" tabindex="0" aria-label="너구리 플랫폼 게임. Enter 시작, 방향키 이동 및 사다리, Space 점프, P 일시정지."></canvas>
+<div class="touch" aria-label="터치 조작"><div><button data-key="ArrowLeft" aria-label="왼쪽">◀</button><button data-key="ArrowRight" aria-label="오른쪽">▶</button><button data-key="ArrowUp" aria-label="위">▲</button><button data-key="ArrowDown" aria-label="아래">▼</button></div><button data-key="Space">JUMP</button></div>
+<footer><p><kbd>← →</kbd> MOVE &nbsp; <kbd>↑ ↓</kbd> CLIMB &nbsp; <kbd>SPACE</kbd> JUMP &nbsp; <kbd>P</kbd> PAUSE</p><div><button id="start">시작 / 다시 시작</button> <button id="sound">SOUND ON</button></div></footer>
+</main>
+<script>
+'use strict';
+// 모든 좌표는 800 × 600 논리 화면 기준입니다. 외부 리소스를 사용하지 않습니다.
+const canvas=document.getElementById('game'),ctx=canvas.getContext('2d');
+const W=800,H=600,floors=[550,454,358,262,166];
+const keys=new Set();
+let jumpQueued=false,audio=null,muted=false,best=0;
+try{best=Number(localStorage.getItem('moonlight-best'))||0;}catch{}
+let state='title',score=0,lives=3,stage=1,time=90,phaseTime=0,paused=false;
+let player,foods=[],enemies=[],ladders=[],gaps=[],spikes=[],particles=[],clock=0;
+const clamp=(n,a,b)=>Math.max(a,Math.min(b,n));
+const overlaps=(a,b)=>a.x<b.x+b.w&&a.x+a.w>b.x&&a.y<b.y+b.h&&a.y+a.h>b.y;
+function tone(freq,duration=.1,type='square',delay=0){
+  if(muted||!audio)return;
+  const t=audio.currentTime+delay,o=audio.createOscillator(),g=audio.createGain();
+  o.type=type;o.frequency.setValueAtTime(freq,t);o.frequency.exponentialRampToValueAtTime(Math.max(40,freq/2),t+duration);
+  g.gain.setValueAtTime(.045,t);g.gain.exponentialRampToValueAtTime(.001,t+duration);
+  o.connect(g);g.connect(audio.destination);o.start(t);o.stop(t+duration);
+}
+function unlockAudio(){try{audio??=new(window.AudioContext||window.webkitAudioContext)();audio.resume().catch(()=>{});}catch{}}
+function saveBest(){if(score>best){best=score;try{localStorage.setItem('moonlight-best',String(best));}catch{}}}
+function addScore(n){score+=n;saveBest();}
+function buildStage(){
+  time=Math.max(60,100-stage*3);particles=[];
+  // 두 개씩 연결하여 모든 층에 왕복 가능한 경로를 제공합니다.
+  ladders=[];
+  for(let f=0;f<4;f++)for(const x of(f%2?[180,620]:[100,700]))ladders.push({x,low:f,high:f+1});
+  gaps=[{f:0,x:370,w:48},{f:2,x:360,w:48},{f:3,x:460,w:48}];
+  spikes=[{f:1,x:350,w:36},{f:2,x:550,w:36},{f:4,x:400,w:36}];
+  foods=[];
+  for(let f=0;f<5;f++)for(let x=62;x<760;x+=56){
+    if(gaps.some(g=>g.f===f&&x>g.x-20&&x<g.x+g.w+20)||spikes.some(s=>s.f===f&&x>s.x-22&&x<s.x+s.w+22))continue;
+    foods.push({x,y:floors[f]-22,w:16,h:18,kind:(f+Math.floor(x/56))%3,taken:false});
+  }
+  player={x:40,y:floors[0]-28,w:26,h:28,vx:0,vy:0,f:0,ground:true,ladder:null,dir:1,inv:1.5};
+  enemies=[];
+  for(let i=0;i<Math.min(3+stage,9);i++){
+    const f=1+i%4;
+    enemies.push({x:i%2?260:650,y:floors[f]-20,w:28,h:20,f,dir:i%2?1:-1,ladder:null,target:0,cool:2+i*.3});
+  }
+}
+function startGame(){score=0;lives=3;stage=1;paused=false;state='play';keys.clear();jumpQueued=false;buildStage();unlockAudio();canvas.focus();}
+function loseLife(){
+  if(state!=='play')return;
+  lives--;state=lives?'dead':'over';phaseTime=1.4;tone(160,.4,'sawtooth');saveBest();
+}
+function burst(x,y){for(let i=0;i<8;i++)particles.push({x,y,vx:Math.cos(i*Math.PI/4)*65,vy:Math.sin(i*Math.PI/4)*65,t:.45});}
+function supported(x,f,w=26){return !gaps.some(g=>g.f===f&&x+w>g.x&&x<g.x+g.w);}
+function update(dt){
+  if(paused)return;
+  clock+=dt;
+  if(state==='dead'||state==='clear'){
+    phaseTime-=dt;
+    if(phaseTime<=0){if(state==='clear')stage++;buildStage();state='play';}
+    return;
+  }
+  if(state!=='play')return;
+  time-=dt;if(time<=0){time=0;loseLife();return;}
+  const p=player;p.inv=Math.max(0,p.inv-dt);
+  const move=Number(keys.has('ArrowRight'))-Number(keys.has('ArrowLeft'));
+  const climb=Number(keys.has('ArrowDown'))-Number(keys.has('ArrowUp'));
+  if(move)p.dir=move;
+  if(!p.ladder&&p.ground&&climb){
+    const l=ladders.find(l=>Math.abs(p.x+p.w/2-l.x)<20&&(climb<0?l.low===p.f:l.high===p.f));
+    if(l){p.ladder=l;p.x=l.x-p.w/2;p.ground=false;p.vy=0;}
+  }
+  if(p.ladder){
+    p.y+=climb*120*dt;
+    const l=p.ladder,top=floors[l.high]-p.h,bottom=floors[l.low]-p.h;
+    if(p.y<=top&&climb<0){p.y=top;p.f=l.high;p.ladder=null;p.ground=true;}
+    else if(p.y>=bottom&&climb>0){p.y=bottom;p.f=l.low;p.ladder=null;p.ground=true;}
+    jumpQueued=false;
+  }else{
+    if(jumpQueued&&p.ground){p.vy=-345;p.ground=false;tone(520,.13);}
+    jumpQueued=false;p.vx=move*185;p.x=clamp(p.x+p.vx*dt,24,W-24-p.w);
+    const oldFeet=p.y+p.h;
+    p.vy+=1000*dt;p.y+=p.vy*dt;p.ground=false;
+    // 현재 층만 착지 대상으로 삼아 아래층으로 빠지는 구멍을 위험으로 처리합니다.
+    if(p.vy>=0&&oldFeet<=floors[p.f]+1&&p.y+p.h>=floors[p.f]&&supported(p.x,p.f,p.w)){
+      p.y=floors[p.f]-p.h;p.vy=0;p.ground=true;
+    }
+    if(p.y+p.h>floors[p.f]+34){loseLife();return;}
+  }
+  for(const s of spikes)if(overlaps(p,{x:s.x+3,y:floors[s.f]-14,w:s.w-6,h:14})){loseLife();return;}
+  for(const e of enemies){
+    const speed=Math.min(115,43+stage*7);e.cool-=dt;
+    if(e.ladder){
+      const goal=floors[e.target]-e.h,delta=goal-e.y;
+      if(Math.abs(delta)<speed*dt){e.y=goal;e.f=e.target;e.ladder=null;e.cool=2;}
+      else e.y+=Math.sign(delta)*speed*dt;
+    }else{
+      const l=ladders.find(l=>(l.low===e.f||l.high===e.f)&&Math.abs(e.x+e.w/2-l.x)<7);
+      if(l&&e.cool<=0){e.ladder=l;e.target=l.low===e.f?l.high:l.low;e.x=l.x-e.w/2;}
+      else{
+        const nx=e.x+e.dir*speed*dt;
+        const blocked=nx<26||nx+e.w>774||!supported(nx,e.f,e.w)||spikes.some(s=>s.f===e.f&&nx+e.w>s.x-4&&nx<s.x+s.w+4);
+        if(blocked)e.dir*=-1;else e.x=nx;
+      }
+    }
+    if(p.inv<=0&&overlaps({x:p.x+4,y:p.y+3,w:p.w-8,h:p.h-3},e)){loseLife();return;}
+  }
+  for(const food of foods)if(!food.taken&&overlaps(p,food)){
+    food.taken=true;addScore(100);burst(food.x+8,food.y+8);tone(880,.08,'square');tone(1320,.08,'triangle',.06);
+  }
+  for(const q of particles){q.x+=q.vx*dt;q.y+=q.vy*dt;q.t-=dt;}particles=particles.filter(q=>q.t>0);
+  if(foods.every(f=>f.taken)){
+    addScore(Math.ceil(time)*10);state='clear';phaseTime=2;
+    [523,659,784,1046].forEach((n,i)=>tone(n,.2,'square',i*.12));
+  }
+}
+function rect(x,y,w,h,c){ctx.fillStyle=c;ctx.fillRect(Math.round(x),Math.round(y),w,h);}
+function text(t,x,y,size=16,color='#e8edd3',align='left'){
+  ctx.fillStyle=color;ctx.font=`bold ${size}px monospace`;ctx.textAlign=align;ctx.fillText(t,x,y);
+}
+function raccoon(p){
+  if(p.inv>0&&Math.floor(clock*12)%2===0)return;
+  const x=Math.round(p.x),y=Math.round(p.y),step=p.ground?Math.sin(clock*18)*(keys.has('ArrowLeft')||keys.has('ArrowRight')?3:0):p.ladder?Math.sin(clock*15)*3:2;
+  const tail=p.dir>0?x-12:x+22;
+  rect(tail,y+13,16,10,'#8797a7');rect(tail+3,y+13,4,10,'#37475e');rect(tail+10,y+13,4,10,'#37475e');
+  rect(x+4,y+11,19,14,'#a7b6bb');rect(x+8,y+16,11,8,'#e5e0c1');
+  rect(x+2,y-2,7,8,'#9caeb6');rect(x+18,y-2,7,8,'#9caeb6');rect(x+3,y+2,22,14,'#c8cfc4');
+  rect(x+2,y+5,24,7,'#263348');rect(x+6,y+6,4,3,'#f6ecb9');rect(x+18,y+6,4,3,'#f6ecb9');
+  rect(x+(p.dir>0?20:1),y+12,6,4,'#202b3b');rect(x+4,y+24+step,7,4,'#d7d7b9');rect(x+17,y+24-step,7,4,'#d7d7b9');
+}
+function drawFood(f){
+  const x=f.x,y=f.y+Math.sin(clock*3+f.x)*2;
+  if(f.kind===0){rect(x+2,y+5,13,11,'#ed786b');rect(x+5,y+3,7,14,'#ed786b');rect(x+4,y+6,3,4,'#ffd5a0');}
+  else if(f.kind===1){rect(x+3,y+5,12,9,'#ffc46b');rect(x+6,y+14,6,3,'#e68d4d');rect(x+8,y+17,3,3,'#e68d4d');}
+  else{rect(x+2,y+7,14,9,'#ac9ce4');rect(x+5,y+4,9,14,'#ac9ce4');rect(x+5,y+7,3,3,'#ead8f4');}
+  rect(x+8,y,3,5,'#95ce83');rect(x+10,y,6,3,'#95ce83');
+}
+function overlay(title,subtitle,color='#ffe39a'){
+  rect(0,82,W,H-82,'#07101bd9');rect(140,218,520,174,'#152437');
+  rect(140,218,520,3,color);text(title,400,275,34,color,'center');text(subtitle,400,316,15,'#d0d8c3','center');
+  text('↑ ↓ 사다리   ·   ← → 이동   ·   SPACE 점프',400,357,14,'#98adad','center');
+}
+function draw(){
+  rect(0,0,W,H,'#101b2b');
+  // 별, 산, 창고를 픽셀 벡터로 그립니다.
+  for(let i=0;i<48;i++)rect((i*137+31)%790,90+(i*67)%465,2,2,i%3?'#2c4052':'#6a7975');
+  rect(704,98,28,28,'#d6dba6');rect(698,95,25,23,'#101b2b');
+  for(let i=0;i<10;i++){const h=35+(i*29)%90;rect(i*88,550-h,62,h,'#15283a');for(let j=0;j<3;j++)rect(i*88+12+j*14,559-h,5,8,'#304540');}
+  for(const l of ladders){const top=floors[l.high],bottom=floors[l.low];rect(l.x-12,top,4,bottom-top,'#758b82');rect(l.x+9,top,4,bottom-top,'#758b82');for(let y=top+8;y<bottom;y+=12)rect(l.x-9,y,18,3,'#536f70');}
+  for(let f=0;f<5;f++){
+    for(let x=24;x<776;x+=8){if(gaps.some(g=>g.f===f&&x>=g.x-2&&x<g.x+g.w))continue;
+      rect(x,floors[f],8,5,'#a6b97f');rect(x,floors[f]+5,8,10,'#405c58');rect(x,floors[f]+11,6,3,'#273e43');}
+    text(String(f+1).padStart(2,'0'),9,floors[f]+9,10,'#607c7d');
+  }
+  for(const s of spikes)for(let x=s.x;x<s.x+s.w;x+=12){ctx.fillStyle='#e99486';ctx.beginPath();ctx.moveTo(x,floors[s.f]);ctx.lineTo(x+6,floors[s.f]-15);ctx.lineTo(x+12,floors[s.f]);ctx.fill();}
+  for(const f of foods)if(!f.taken)drawFood(f);
+  for(const e of enemies){const y=e.y+Math.sin(clock*12+e.x)*1.5;rect(e.x,y+5,28,13,'#c49ada');rect(e.x+4,y+2,20,16,'#c49ada');rect(e.x+(e.dir>0?19:3),y+5,5,5,'#fff0c4');rect(e.x+(e.dir>0?22:3),y+6,2,3,'#252b42');for(let i=0;i<3;i++)rect(e.x+3+i*9,y+18,4,3,'#936ca9');}
+  raccoon(player);
+  for(const q of particles)rect(q.x,q.y,3,3,'#ffde88');
+  rect(0,0,W,80,'#0a1322');rect(24,79,752,1,'#455b57');
+  const remaining=foods.filter(f=>!f.taken).length;
+  [['SCORE',String(score).padStart(6,'0'),28],['BEST',String(best).padStart(6,'0'),185],['LIVES','♥ '.repeat(lives),352],['STAGE',String(stage).padStart(2,'0'),505],['TIME',String(Math.ceil(time)).padStart(3,'0'),657]].forEach(([label,value,x])=>{text(label,x,25,11,'#8daba1');text(value,x,55,23,label==='TIME'&&time<20?'#ff9582':'#e7e6bb');});
+  text(`HARVEST ${foods.length-remaining}/${foods.length}`,400,111,11,'#b5c48f','center');
+  if(state==='title')overlay('MOONLIGHT MARKET','음식을 모두 모으세요!  ENTER / 시작 버튼');
+  if(state==='dead')overlay('OUCH!','목숨을 잃었습니다. 스테이지를 다시 시작합니다.','#f19c8d');
+  if(state==='clear')overlay('STAGE CLEAR',`TIME BONUS!  다음 스테이지 ${stage+1}`);
+  if(state==='over')overlay('GAME OVER','Press Enter to Restart','#f19c8d');
+  if(paused)overlay('PAUSED','P 키 또는 화면을 눌러 계속');
+  // 가느다란 스캔라인 효과
+  ctx.globalAlpha=.07;for(let y=0;y<H;y+=4)rect(0,y,W,1,'#000');ctx.globalAlpha=1;
+}
+function press(code){
+  unlockAudio();
+  if(code==='Enter'&&(state==='title'||state==='over'))startGame();
+  if(code==='KeyP'&&state==='play'){paused=!paused;keys.clear();jumpQueued=false;}
+  if(code==='Space'&&!keys.has(code)&&state==='play'&&!paused)jumpQueued=true;
+  keys.add(code);
+}
+window.addEventListener('keydown',e=>{if(['ArrowLeft','ArrowRight','ArrowUp','ArrowDown','Space','Enter','KeyP'].includes(e.code)){if(e.target.tagName==='BUTTON'&&(e.code==='Enter'||e.code==='Space'))return;e.preventDefault();if(!e.repeat)press(e.code);}});
+window.addEventListener('keyup',e=>keys.delete(e.code));
+function suspend(){keys.clear();jumpQueued=false;if(state==='play')paused=true;}
+window.addEventListener('blur',suspend);document.addEventListener('visibilitychange',()=>{if(document.hidden)suspend();});
+canvas.addEventListener('pointerdown',()=>{unlockAudio();canvas.focus();if(state==='title'||state==='over')startGame();else if(paused)paused=false;});
+document.getElementById('start').onclick=startGame;
+document.getElementById('sound').onclick=()=>{muted=!muted;document.getElementById('sound').textContent=muted?'SOUND OFF':'SOUND ON';unlockAudio();};
+for(const b of document.querySelectorAll('[data-key]')){b.addEventListener('pointerdown',e=>{e.preventDefault();b.setPointerCapture(e.pointerId);press(b.dataset.key);});for(const event of['pointerup','pointercancel','lostpointercapture'])b.addEventListener(event,()=>keys.delete(b.dataset.key));}
+buildStage();
+// 고정 시간 간격으로 물리를 계산하여 화면 주사율과 관계없이 일관되게 움직입니다.
+let last=0,accumulator=0;
+function frame(now){const elapsed=last?Math.min((now-last)/1000,.1):0;last=now;accumulator+=elapsed;while(accumulator>=1/120){update(1/120);accumulator-=1/120;}draw();requestAnimationFrame(frame);}
+requestAnimationFrame(frame);
+</script>
+</body>
+</html>
