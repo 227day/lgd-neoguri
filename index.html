@@ -7,6 +7,12 @@
 <style>
 *{box-sizing:border-box}body{margin:0;min-height:100vh;display:grid;place-items:center;background:#090f1b;color:#e7ead3;font-family:monospace}main{width:min(960px,96vw);padding:24px 0}header{display:flex;align-items:center;justify-content:space-between;margin-bottom:16px}h1{font-size:clamp(18px,3vw,28px);letter-spacing:3px;margin:0}header small{color:#99ae9b;font-size:11px;letter-spacing:2px}.badge{color:#bde877;border:1px solid #526747;padding:8px 12px;font-size:11px}canvas{display:block;width:100%;aspect-ratio:4/3;background:#101828;border:2px solid #53654f;box-shadow:0 16px 70px #0008;image-rendering:pixelated;outline:none}footer{display:flex;justify-content:space-between;gap:12px;flex-wrap:wrap;color:#91a297;font-size:12px;margin-top:16px}button{font:inherit;color:#c7dbb0;background:#172536;border:1px solid #526747;padding:8px 12px;cursor:pointer}button:focus-visible{outline:2px solid #ffe68b}kbd{color:#f6dd87}p{margin:0}.touch{display:flex;justify-content:space-between;margin-top:12px;gap:8px}.touch button{min-width:44px;min-height:44px;touch-action:none;user-select:none}.touch div{display:flex;gap:6px}@media(min-width:900px) and (pointer:fine){.touch{display:none}}
 </style>
+<style>
+main{width:min(960px,96vw,calc((100dvh - 150px)*4/3))}
+canvas:focus-visible{outline:2px solid #ffe68b;outline-offset:4px}
+@media(max-width:600px){main{width:96vw;padding:14px 0}header{gap:8px}header small{letter-spacing:1px;font-size:9px}.badge{font-size:9px;padding:6px}h1{letter-spacing:1px}footer{line-height:1.8}}
+@media(prefers-reduced-motion:reduce){canvas{box-shadow:none}}
+</style>
 </head>
 <body>
 <main>
@@ -22,7 +28,7 @@ const canvas=document.getElementById('game'),ctx=canvas.getContext('2d');
 const W=800,H=600,floors=[550,454,358,262,166];
 const keys=new Set();
 let jumpQueued=false,audio=null,muted=false,best=0;
-try{best=Number(localStorage.getItem('moonlight-best'))||0;}catch{}
+try{const stored=Number(localStorage.getItem('moonlight-best'));if(Number.isFinite(stored)&&stored>0)best=Math.floor(stored);}catch{}
 let state='title',score=0,lives=3,stage=1,time=90,phaseTime=0,paused=false;
 let player,foods=[],enemies=[],ladders=[],gaps=[],spikes=[],particles=[],clock=0;
 const clamp=(n,a,b)=>Math.max(a,Math.min(b,n));
@@ -33,6 +39,7 @@ function tone(freq,duration=.1,type='square',delay=0){
   o.type=type;o.frequency.setValueAtTime(freq,t);o.frequency.exponentialRampToValueAtTime(Math.max(40,freq/2),t+duration);
   g.gain.setValueAtTime(.045,t);g.gain.exponentialRampToValueAtTime(.001,t+duration);
   o.connect(g);g.connect(audio.destination);o.start(t);o.stop(t+duration);
+  o.onended=()=>{o.disconnect();g.disconnect();};
 }
 function unlockAudio(){try{audio??=new(window.AudioContext||window.webkitAudioContext)();audio.resume().catch(()=>{});}catch{}}
 function saveBest(){if(score>best){best=score;try{localStorage.setItem('moonlight-best',String(best));}catch{}}}
@@ -62,7 +69,8 @@ function loseLife(){
   lives--;state=lives?'dead':'over';phaseTime=1.4;tone(160,.4,'sawtooth');saveBest();
 }
 function burst(x,y){for(let i=0;i<8;i++)particles.push({x,y,vx:Math.cos(i*Math.PI/4)*65,vy:Math.sin(i*Math.PI/4)*65,t:.45});}
-function supported(x,f,w=26){return !gaps.some(g=>g.f===f&&x+w>g.x&&x<g.x+g.w);}
+// 양발이 모두 틈 위에 있을 때만 추락합니다. 적은 몸 전체가 안전한 곳에서 순찰합니다.
+function supported(x,f,w=26,margin=5){return !gaps.some(g=>g.f===f&&x+margin>=g.x&&x+w-margin<=g.x+g.w);}
 function update(dt){
   if(paused)return;
   clock+=dt;
@@ -110,7 +118,7 @@ function update(dt){
       if(l&&e.cool<=0){e.ladder=l;e.target=l.low===e.f?l.high:l.low;e.x=l.x-e.w/2;}
       else{
         const nx=e.x+e.dir*speed*dt;
-        const blocked=nx<26||nx+e.w>774||!supported(nx,e.f,e.w)||spikes.some(s=>s.f===e.f&&nx+e.w>s.x-4&&nx<s.x+s.w+4);
+        const blocked=nx<26||nx+e.w>774||gaps.some(g=>g.f===e.f&&nx+e.w>g.x&&nx<g.x+g.w)||spikes.some(s=>s.f===e.f&&nx+e.w>s.x-4&&nx<s.x+s.w+4);
         if(blocked)e.dir*=-1;else e.x=nx;
       }
     }
@@ -159,8 +167,8 @@ function draw(){
   for(let i=0;i<10;i++){const h=35+(i*29)%90;rect(i*88,550-h,62,h,'#15283a');for(let j=0;j<3;j++)rect(i*88+12+j*14,559-h,5,8,'#304540');}
   for(const l of ladders){const top=floors[l.high],bottom=floors[l.low];rect(l.x-12,top,4,bottom-top,'#758b82');rect(l.x+9,top,4,bottom-top,'#758b82');for(let y=top+8;y<bottom;y+=12)rect(l.x-9,y,18,3,'#536f70');}
   for(let f=0;f<5;f++){
-    for(let x=24;x<776;x+=8){if(gaps.some(g=>g.f===f&&x>=g.x-2&&x<g.x+g.w))continue;
-      rect(x,floors[f],8,5,'#a6b97f');rect(x,floors[f]+5,8,10,'#405c58');rect(x,floors[f]+11,6,3,'#273e43');}
+    for(let x=24;x<776;x+=2){if(gaps.some(g=>g.f===f&&x>=g.x&&x<g.x+g.w))continue;
+      rect(x,floors[f],2,5,'#a6b97f');rect(x,floors[f]+5,2,10,'#405c58');if(x%8<6)rect(x,floors[f]+11,2,3,'#273e43');}
     text(String(f+1).padStart(2,'0'),9,floors[f]+9,10,'#607c7d');
   }
   for(const s of spikes)for(let x=s.x;x<s.x+s.w;x+=12){ctx.fillStyle='#e99486';ctx.beginPath();ctx.moveTo(x,floors[s.f]);ctx.lineTo(x+6,floors[s.f]-15);ctx.lineTo(x+12,floors[s.f]);ctx.fill();}
@@ -174,8 +182,8 @@ function draw(){
   text(`HARVEST ${foods.length-remaining}/${foods.length}`,400,111,11,'#b5c48f','center');
   if(state==='title')overlay('MOONLIGHT MARKET','음식을 모두 모으세요!  ENTER / 시작 버튼');
   if(state==='dead')overlay('OUCH!','목숨을 잃었습니다. 스테이지를 다시 시작합니다.','#f19c8d');
-  if(state==='clear')overlay('STAGE CLEAR',`TIME BONUS!  다음 스테이지 ${stage+1}`);
-  if(state==='over')overlay('GAME OVER','Press Enter to Restart','#f19c8d');
+  if(state==='clear')overlay('스테이지 클리어',`시간 보너스 +${Math.ceil(time)*10} · 다음 스테이지 ${stage+1}`);
+  if(state==='over')overlay('게임 종료','다시 시작하려면 Enter를 누르세요','#f19c8d');
   if(paused)overlay('PAUSED','P 키 또는 화면을 눌러 계속');
   // 가느다란 스캔라인 효과
   ctx.globalAlpha=.07;for(let y=0;y<H;y+=4)rect(0,y,W,1,'#000');ctx.globalAlpha=1;
