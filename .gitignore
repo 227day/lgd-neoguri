@@ -1,0 +1,10 @@
+# 운영체제에서 생성하는 파일
+.DS_Store
+._*
+Thumbs.db
+Desktop.ini
+
+# 편집기 임시 파일
+*.swp
+*.swo
+*~
